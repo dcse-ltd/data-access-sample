@@ -1,38 +1,53 @@
 ﻿using DataAccess.Context;
 using DataAccess.Entity.Interfaces;
+using DataAccess.Exceptions;
 using DataAccess.Repository.Interfaces;
 using DataAccess.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace DataAccess.Repository;
 
-public class Repository<T>(
-    AppDbContext context,
-    IEntityLockService entityLockService,
-    ICurrentUserService currentUserService) : IRepository<T>
-    where T : class, IEntity
+public class Repository<TEntity>(
+    BaseAppDbContext context,
+    IEntityLockService<TEntity> entityLockService,
+    ICurrentUserService currentUserService) : IRepository<TEntity>
+    where TEntity : class, IEntity
 {
-    private readonly DbSet<T> _dbSet = context.Set<T>();
+    private readonly DbSet<TEntity> _dbSet = context.Set<TEntity>();
 
-    public async Task<T?> GetByIdAsync(Guid id, bool lockForEdit = false, CancellationToken cancellationToken = default)
+    public async Task<TEntity> GetByIdAsync(
+        Guid id, 
+        bool trackChanges = true,
+        CancellationToken cancellationToken = default)
     {
-        var entity = await _dbSet.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
-        var userId = currentUserService.UserId;
-        if (lockForEdit)
-            entityLockService.LockIfSupported(entity, userId);
+        var query = trackChanges ? _dbSet : _dbSet.AsNoTracking();
+        var entity = await query.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
         
-        return entity;
+        return entity ?? throw new EntityNotFoundException(typeof(TEntity).Name, id);
     }
     
-    public async Task<IEnumerable<T>> GetAllAsync(CancellationToken cancellationToken) 
-        => await _dbSet.ToListAsync(cancellationToken);
+    public async Task<IEnumerable<TEntity>> GetAllAsync(
+        CancellationToken cancellationToken) 
+        => await _dbSet.AsNoTracking().ToListAsync(cancellationToken);
     
-    public async Task AddAsync(T entity, CancellationToken cancellationToken) 
+    public async Task AddAsync(
+        TEntity entity, 
+        CancellationToken cancellationToken) 
         => await _dbSet.AddAsync(entity, cancellationToken);
-    
-    public void Update(T entity)
-        => Task.FromResult(_dbSet.Update(entity));
-    
-    public void Remove(T entity) 
-        => _dbSet.Remove(entity);
+
+    public TEntity UpdateAsync(
+        TEntity entity)
+    {   
+        var userId = currentUserService.UserId;
+        entityLockService.ValidateLockForUpdate(entity, userId);
+        _dbSet.Update(entity);
+        return entity;
+    }
+
+    public void Remove(TEntity entity)
+    {
+        var userId = currentUserService.UserId;
+        entityLockService.ValidateLockForUpdate(entity, userId);
+        _dbSet.Remove(entity);   
+    }
 }

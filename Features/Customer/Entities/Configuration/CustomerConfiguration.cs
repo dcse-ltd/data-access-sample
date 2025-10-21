@@ -1,7 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace DataAccess.Entity.Configuration;
+namespace Features.Customer.Entities.Configuration;
 
 public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
 {

@@ -4,6 +4,6 @@ namespace DataAccess.UnitOfWork.Interfaces;
 
 public interface IUnitOfWorkProcessor
 {
-    Task BeforeSaveChangesAsync(AppDbContext context);
-    Task AfterSaveChangesAsync(AppDbContext context);
+    Task BeforeSaveChangesAsync(BaseAppDbContext context);
+    Task AfterSaveChangesAsync(BaseAppDbContext context);
 }

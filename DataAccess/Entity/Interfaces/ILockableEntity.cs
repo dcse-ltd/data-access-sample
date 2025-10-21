@@ -1,10 +1,9 @@
-﻿using DataAccess.Entity.Models;
+﻿using DataAccess.Entity.Behaviors;
 
 namespace DataAccess.Entity.Interfaces;
 
-public interface ILockableEntity
+public interface ILockableEntity<TEntity>
+where TEntity : IEntity
 {
-    public LockInfo LockInfo { get; set; }
-    void Lock(Guid userId);
-    void Unlock();
+    LockingBehavior<TEntity> Locking { get; }
 }

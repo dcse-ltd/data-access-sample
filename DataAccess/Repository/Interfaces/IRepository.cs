@@ -2,11 +2,23 @@
 
 namespace DataAccess.Repository.Interfaces;
 
-public interface IRepository<T> where T : IEntity
+public interface IRepository<TEntity> where TEntity : IEntity
 {
-    Task<T?> GetByIdAsync(Guid id, bool lockForEdit, CancellationToken cancellationToken);
-    Task<IEnumerable<T>> GetAllAsync(CancellationToken cancellationToken);
-    Task AddAsync(T entity, CancellationToken cancellationToken);
-    void Update(T entity);
-    void Remove(T entity);
+    Task<TEntity> GetByIdAsync(
+        Guid id, 
+        bool trackChanges = true,
+        CancellationToken cancellationToken = default);
+    
+    Task<IEnumerable<TEntity>> GetAllAsync(
+        CancellationToken cancellationToken);
+    
+    Task AddAsync(
+        TEntity entity, 
+        CancellationToken cancellationToken);
+    
+    TEntity UpdateAsync(
+        TEntity entity);
+    
+    void Remove(
+        TEntity entity);
 }

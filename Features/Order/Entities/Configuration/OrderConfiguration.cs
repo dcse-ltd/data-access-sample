@@ -1,7 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace DataAccess.Entity.Configuration;
+namespace Features.Order.Entities.Configuration;
 
 public class OrderConfiguration : IEntityTypeConfiguration<Order>
 {

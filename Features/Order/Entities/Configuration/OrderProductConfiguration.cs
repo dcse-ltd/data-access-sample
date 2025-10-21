@@ -1,7 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace DataAccess.Entity.Configuration;
+namespace Features.Order.Entities.Configuration;
 
 public class OrderProductConfiguration : IEntityTypeConfiguration<OrderProduct>
 {
@@ -22,5 +22,9 @@ public class OrderProductConfiguration : IEntityTypeConfiguration<OrderProduct>
         _ = builder
             .HasIndex(x => new { x.OrderId, x.ProductId })
             .IsUnique();
+
+        _ = builder
+            .Property(x => x.Price)
+            .HasPrecision(18, 2);
     }
 }

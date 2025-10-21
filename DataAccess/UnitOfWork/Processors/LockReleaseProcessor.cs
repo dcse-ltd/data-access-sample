@@ -1,30 +1,60 @@
 ﻿using DataAccess.Context;
 using DataAccess.Entity.Interfaces;
+using DataAccess.Services.Interfaces;
 using DataAccess.UnitOfWork.Interfaces;
 
 namespace DataAccess.UnitOfWork.Processors;
 
-public class LockReleaseProcessor : IUnitOfWorkProcessor
+public class LockReleaseProcessor(ICurrentUserService currentUserService) 
+    : IUnitOfWorkProcessor
 {
-    private readonly List<ILockableEntity> _toUnlock = [];
+    private readonly List<UnlockAction> _toUnlock = [];
 
-    public void Track(ILockableEntity entity)
+    public void Track<TEntity>(TEntity entity) 
+        where TEntity : class, IEntity
     {
-        if (!_toUnlock.Contains(entity))
-            _toUnlock.Add(entity);
+        if (entity is not ILockableEntity<TEntity> lockable) 
+            return;
+        
+        var userId = currentUserService.UserId;
+            
+        if (_toUnlock.All(a => a.Entity != entity))
+        {
+            _toUnlock.Add(new UnlockAction
+            {
+                Entity = entity,
+                UserId = userId,
+                UnlockFunc = () => lockable.Locking.Unlock(userId)
+            });
+        }
     }
 
-    public Task BeforeSaveChangesAsync(AppDbContext context) 
+    public async Task BeforeSaveChangesAsync(BaseAppDbContext context) 
+    {
+        try
+        {
+            foreach (var action in _toUnlock)
+            {
+                action.UnlockFunc();
+            }
+
+            _toUnlock.Clear();
+            await context.SaveChangesAsync();
+        }
+        catch
+        {
+            _toUnlock.Clear();
+            throw;
+        }
+    }  
+
+    public Task AfterSaveChangesAsync(BaseAppDbContext context)
         => Task.CompletedTask;
 
-    public Task AfterSaveChangesAsync(AppDbContext context)
+    private class UnlockAction
     {
-        foreach (var entity in _toUnlock)
-        {
-            entity.Unlock();
-        }
-
-        _toUnlock.Clear();
-        return context.SaveChangesAsync();
-    }    
+        public object Entity { get; set; } = null!;
+        public Guid UserId { get; set; }
+        public Action UnlockFunc { get; set; } = null!;
+    }
 }

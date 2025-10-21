@@ -1,7 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace DataAccess.Entity.Configuration;
+namespace Features.Product.Entities.Configuration;
 
 public class ProductConfiguration : IEntityTypeConfiguration<Product>
 {
@@ -20,5 +20,9 @@ public class ProductConfiguration : IEntityTypeConfiguration<Product>
         _ = builder
             .HasIndex(x => x.Name)
             .IsUnique();
+
+        _ = builder
+            .Property(x => x.Price)
+            .HasPrecision(18, 2);
     }
 }

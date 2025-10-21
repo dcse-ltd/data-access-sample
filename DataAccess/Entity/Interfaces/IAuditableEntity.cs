@@ -1,8 +1,8 @@
-﻿using DataAccess.Entity.Models;
+﻿using DataAccess.Entity.Behaviors;
 
 namespace DataAccess.Entity.Interfaces;
 
 public interface IAuditableEntity
 {
-    public AuditInfo AuditInfo { get; set; }
+    public AuditingBehavior Auditing { get; }
 }

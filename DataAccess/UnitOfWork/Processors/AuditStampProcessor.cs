@@ -8,7 +8,7 @@ namespace DataAccess.UnitOfWork.Processors;
 
 public class AuditStampProcessor(ICurrentUserService currentUser) : IUnitOfWorkProcessor
 {
-    public Task BeforeSaveChangesAsync(AppDbContext context)
+    public Task BeforeSaveChangesAsync(BaseAppDbContext context)
     {
         var userId = currentUser.UserId;
         var now = DateTime.UtcNow;
@@ -18,12 +18,12 @@ public class AuditStampProcessor(ICurrentUserService currentUser) : IUnitOfWorkP
             switch (entry.State)
             {
                 case EntityState.Added:
-                    entry.Entity.AuditInfo.CreatedOn = now;
-                    entry.Entity.AuditInfo.CreatedBy = userId;
+                    entry.Entity.Auditing.AuditInfo.CreatedAtUtc = now;
+                    entry.Entity.Auditing.AuditInfo.CreatedByUserId = userId;
                     break;
                 case EntityState.Modified:
-                    entry.Entity.AuditInfo.ModifiedOn = now;
-                    entry.Entity.AuditInfo.ModifiedBy = userId;
+                    entry.Entity.Auditing.AuditInfo.ModifiedAtUtc = now;
+                    entry.Entity.Auditing.AuditInfo.ModifiedByUserId = userId;
                     break;
             }
         }
@@ -31,6 +31,6 @@ public class AuditStampProcessor(ICurrentUserService currentUser) : IUnitOfWorkP
         return Task.CompletedTask;
     }
 
-    public Task AfterSaveChangesAsync(AppDbContext context) 
+    public Task AfterSaveChangesAsync(BaseAppDbContext context) 
         => Task.CompletedTask;
 }

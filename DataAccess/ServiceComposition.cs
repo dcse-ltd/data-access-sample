@@ -13,7 +13,6 @@ public static class ServiceComposition
 {
     public static void RegisterDataAccess(IServiceCollection services)
     {
-        services.AddScoped<AppDbContext>();
         services.AddScoped<IUnitOfWork, UnitOfWork.UnitOfWork>();
         services.AddScoped<IUnitOfWorkProcessor, AuditStampProcessor>();
         services.AddScoped<IUnitOfWorkProcessor, LockReleaseProcessor>();
@@ -21,6 +20,6 @@ public static class ServiceComposition
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
 
         services.AddScoped<ICurrentUserService, CurrentUserService>();
-        services.AddScoped<IEntityLockService, EntityLockService>();
+        services.AddScoped(typeof(IEntityLockService<>), typeof(EntityLockService<>));
     }
 }
