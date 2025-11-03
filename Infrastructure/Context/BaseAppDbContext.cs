@@ -2,6 +2,7 @@
 using Infrastructure.Entity.Configuration.Extensions;
 using Infrastructure.Entity.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using System.Linq;
 
 namespace Infrastructure.Context;
 
@@ -20,7 +21,10 @@ public abstract class BaseAppDbContext(
     
     private static void ConfigureBehaviorsByConvention(ModelBuilder modelBuilder)
     {
-        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        // Materialize the collection first to avoid "collection modified" errors
+        var entityTypes = modelBuilder.Model.GetEntityTypes().ToList();
+        
+        foreach (var entityType in entityTypes)
         {
             var clrType = entityType.ClrType;
             var lockableInterface = clrType.GetInterfaces()
@@ -45,7 +49,12 @@ public abstract class BaseAppDbContext(
                     .GetMethod(nameof(LockingConfiguration.ConfigureLocking))
                     ?.MakeGenericMethod(clrType);
                 
-                lockingMethod?.Invoke(null, [modelBuilder.Entity(clrType)]);
+                // Get the generic Entity<TEntity>() method
+                var entityMethod = typeof(ModelBuilder).GetMethod(nameof(ModelBuilder.Entity), Type.EmptyTypes)
+                    ?.MakeGenericMethod(clrType);
+                var entityBuilder = entityMethod?.Invoke(modelBuilder, null);
+                
+                lockingMethod?.Invoke(null, [entityBuilder]);
             }
             
             if (isAuditable)
@@ -54,7 +63,12 @@ public abstract class BaseAppDbContext(
                     .GetMethod(nameof(AuditingConfiguration.ConfigureAuditing))
                     ?.MakeGenericMethod(clrType);
                 
-                auditableMethod?.Invoke(null, [modelBuilder.Entity(clrType)]);
+                // Get the generic Entity<TEntity>() method
+                var entityMethod = typeof(ModelBuilder).GetMethod(nameof(ModelBuilder.Entity), Type.EmptyTypes)
+                    ?.MakeGenericMethod(clrType);
+                var entityBuilder = entityMethod?.Invoke(modelBuilder, null);
+                
+                auditableMethod?.Invoke(null, [entityBuilder]);
             }
             
             if (isSoftDeletable)
@@ -63,7 +77,12 @@ public abstract class BaseAppDbContext(
                     .GetMethod(nameof(SoftDeletableConfiguration.ConfigureSoftDeletable))
                     ?.MakeGenericMethod(clrType);
                 
-                softDeletableMethod?.Invoke(null, [modelBuilder.Entity(clrType)]);
+                // Get the generic Entity<TEntity>() method
+                var entityMethod = typeof(ModelBuilder).GetMethod(nameof(ModelBuilder.Entity), Type.EmptyTypes)
+                    ?.MakeGenericMethod(clrType);
+                var entityBuilder = entityMethod?.Invoke(modelBuilder, null);
+                
+                softDeletableMethod?.Invoke(null, [entityBuilder]);
             }
 
             if (!isConcurrent) 
@@ -73,13 +92,21 @@ public abstract class BaseAppDbContext(
                 .GetMethod(nameof(ConcurrencyConfiguration.ConfigureConcurrency))
                 ?.MakeGenericMethod(clrType);
 
-            concurrencyMethod?.Invoke(null, [modelBuilder.Entity(clrType)]);
+            // Get the generic Entity<TEntity>() method
+            var entityMethod2 = typeof(ModelBuilder).GetMethod(nameof(ModelBuilder.Entity), Type.EmptyTypes)
+                ?.MakeGenericMethod(clrType);
+            var entityBuilder2 = entityMethod2?.Invoke(modelBuilder, null);
+
+            concurrencyMethod?.Invoke(null, [entityBuilder2]);
         }
     }
     
     private static void ApplySoftDeleteQueryFilter(ModelBuilder modelBuilder)
     {
-        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        // Materialize the collection first to avoid "collection modified" errors
+        var entityTypes = modelBuilder.Model.GetEntityTypes().ToList();
+        
+        foreach (var entityType in entityTypes)
         {
             if (!typeof(ISoftDeletableEntity).IsAssignableFrom(entityType.ClrType))
                 continue;

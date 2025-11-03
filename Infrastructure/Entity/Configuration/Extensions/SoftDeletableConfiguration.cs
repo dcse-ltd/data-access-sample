@@ -11,16 +11,19 @@ public static class SoftDeletableConfiguration
     {
         builder.OwnsOne(e => e.Deleted, softDelete =>
         {
-            softDelete.Property(a => a.SoftDeleteInfo.IsDeleted)
-                .IsRequired();
-            
-            softDelete.Property(a => a.SoftDeleteInfo.DeletedAtUtc)
-                .IsRequired(false);
+            softDelete.OwnsOne(sd => sd.SoftDeleteInfo, softDeleteInfo =>
+            {
+                softDeleteInfo.Property(sdi => sdi.IsDeleted)
+                    .IsRequired();
+                
+                softDeleteInfo.Property(sdi => sdi.DeletedAtUtc)
+                    .IsRequired(false);
 
-            softDelete.Property(a => a.SoftDeleteInfo.DeletedByUserId)
-                .IsRequired(false);
-            
-            softDelete.HasIndex(a => a.SoftDeleteInfo.IsDeleted);
+                softDeleteInfo.Property(sdi => sdi.DeletedByUserId)
+                    .IsRequired(false);
+                
+                softDeleteInfo.HasIndex(sdi => sdi.IsDeleted);
+            });
         });
     }
 }

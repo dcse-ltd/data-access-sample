@@ -26,8 +26,11 @@ public class OrderProductConfiguration : IEntityTypeConfiguration<OrderProduct>
             .HasForeignKey(x => x.ProductId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        builder.HasIndex(op => op.OrderId);
-        builder.HasIndex(op => op.ProductId);
+        builder
+            .HasIndex(op => op.OrderId);
+        
+        builder
+            .HasIndex(op => op.ProductId);
         
         builder
             .HasIndex(x => new { x.OrderId, x.ProductId })

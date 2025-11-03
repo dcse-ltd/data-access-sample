@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using System.Collections.Concurrent;
 using System.Reflection;
 using Infrastructure.Entity.Attributes;
 using Infrastructure.Entity.Interfaces;
@@ -9,39 +10,184 @@ using Microsoft.Extensions.Logging;
 
 namespace Infrastructure.Services;
 
+/// <summary>
+/// Service for managing entity locking functionality, including locking, unlocking, validation, and refresh operations.
+/// Supports both single entity locking and cascading locks for parent-child relationships.
+/// </summary>
+/// <typeparam name="TEntity">The entity type that implements <see cref="IEntity"/> and optionally <see cref="ILockableEntity{TEntity}"/>.</typeparam>
+/// <remarks>
+/// This service provides comprehensive lock management for entities that implement <see cref="ILockableEntity{TEntity}"/>.
+/// It supports:
+/// <list type="bullet">
+/// <item><description>Locking/unlocking entities</description></item>
+/// <item><description>Cascading locks to child entities via <see cref="CascadeLockAttribute"/></description></item>
+/// <item><description>Validating locks before updates</description></item>
+/// <item><description>Refreshing locks to extend expiration</description></item>
+/// <item><description>Force unlocking entities (administrative operation)</description></item>
+/// </list>
+/// 
+/// Lock validation ensures that:
+/// <list type="bullet">
+/// <item><description>The entity is locked before modification</description></item>
+/// <item><description>The lock belongs to the current user</description></item>
+/// <item><description>The lock hasn't expired</description></item>
+/// <item><description>Child entities are also properly locked (when using cascading validation)</description></item>
+/// </list>
+/// 
+/// Usage example:
+/// <code>
+/// // Lock an entity
+/// entityLockService.LockIfSupported(entity, userId);
+/// 
+/// // Lock with cascading to children
+/// entityLockService.LockWithChildrenIfSupported(entity, userId, maxDepth: 1);
+/// 
+/// // Validate lock before update
+/// entityLockService.ValidateLockForUpdateWithChildren(entity, userId, maxDepth: 1);
+/// 
+/// // Unlock after update
+/// entityLockService.UnlockWithChildrenIfSupported(entity, userId, maxDepth: 1);
+/// </code>
+/// </remarks>
 public class EntityLockService<TEntity>(
     ILogger<EntityLockService<TEntity>> logger
     ) : IEntityLockService<TEntity>
     where TEntity : class, IEntity
 {
+    /// <summary>
+    /// Static cache for reflection metadata to improve performance when working with child entities.
+    /// </summary>
+    private static readonly ConcurrentDictionary<Type, LockableEntityReflectionInfo> ReflectionCache = new();
+
+    /// <summary>
+    /// Cached reflection information for lockable entities.
+    /// </summary>
+    private class LockableEntityReflectionInfo
+    {
+        public PropertyInfo? LockingProperty { get; set; }
+        public PropertyInfo? LockInfoProperty { get; set; }
+        public PropertyInfo? IdProperty { get; set; }
+        public MethodInfo? LockMethod { get; set; }
+        public MethodInfo? UnlockMethod { get; set; }
+        public MethodInfo? RefreshLockMethod { get; set; }
+        public MethodInfo? ForceUnlockMethod { get; set; }
+    }
+
+    /// <summary>
+    /// Checks if an entity implements ILockableEntity<> regardless of the generic type parameter.
+    /// </summary>
+    private static bool IsLockableEntity(object entity)
+    {
+        if (entity == null)
+            return false;
+
+        var entityType = entity.GetType();
+        return entityType.GetInterfaces()
+            .Any(i => i.IsGenericType && 
+                      i.GetGenericTypeDefinition() == typeof(ILockableEntity<>));
+    }
+
+    /// <summary>
+    /// Gets or creates cached reflection information for the specified entity type.
+    /// </summary>
+    private static LockableEntityReflectionInfo GetReflectionInfo(Type entityType)
+    {
+        return ReflectionCache.GetOrAdd(entityType, type =>
+        {
+            var info = new LockableEntityReflectionInfo
+            {
+                LockingProperty = type.GetProperty("Locking", BindingFlags.Public | BindingFlags.Instance),
+                IdProperty = type.GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)
+            };
+
+            if (info.LockingProperty != null)
+            {
+                var lockingType = info.LockingProperty.PropertyType;
+                info.LockInfoProperty = lockingType.GetProperty("LockInfo", BindingFlags.Public | BindingFlags.Instance);
+                info.LockMethod = lockingType.GetMethod("Lock", BindingFlags.Public | BindingFlags.Instance);
+                info.UnlockMethod = lockingType.GetMethod("Unlock", BindingFlags.Public | BindingFlags.Instance);
+                info.RefreshLockMethod = lockingType.GetMethod("RefreshLock", BindingFlags.Public | BindingFlags.Instance);
+                info.ForceUnlockMethod = lockingType.GetMethod("ForceUnlock", BindingFlags.Public | BindingFlags.Instance);
+            }
+
+            return info;
+        });
+    }
+    /// <summary>
+    /// Locks an entity for the specified user if the entity supports locking.
+    /// </summary>
+    /// <param name="entity">The entity to lock.</param>
+    /// <param name="userId">The ID of the user locking the entity.</param>
+    /// <remarks>
+    /// If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>, this method does nothing.
+    /// Locking prevents other users from modifying the entity until it's unlocked or the lock expires.
+    /// </remarks>
     public void LockIfSupported(TEntity entity, Guid userId)
     {
         if (entity is ILockableEntity<TEntity> lockable)
         {
-            logger.LogInformation("Locking {Entity} with the Id: {EntityId}, to the User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
+            logger.LogDebug("Locking {Entity} with the Id: {EntityId}, to the User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
             lockable.Locking.Lock(userId);
+            logger.LogInformation("{Entity} with the Id: {EntityId} successfully locked to User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
         }
         else
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
+            logger.LogDebug("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
         }
     }
     
+    /// <summary>
+    /// Locks an entity and its child entities recursively based on <see cref="CascadeLockAttribute"/>.
+    /// </summary>
+    /// <param name="entity">The entity to lock.</param>
+    /// <param name="userId">The ID of the user locking the entity.</param>
+    /// <param name="maxDepth">The maximum depth to traverse when locking children (default: 1).</param>
+    /// <remarks>
+    /// This method locks the entity first, then recursively locks all child entities 
+    /// marked with <see cref="CascadeLockAttribute"/> up to the specified depth.
+    /// Useful when you want to prevent modifications to a parent entity and all its related children.
+    /// </remarks>
     public void LockWithChildrenIfSupported(TEntity entity, Guid userId, int maxDepth = 1)
     {
         LockIfSupported(entity, userId);
         LockChildrenRecursive(entity, userId, currentDepth: 0, maxDepth);
     }
 
+    /// <summary>
+    /// Unlocks an entity for the specified user if the entity supports locking and the user owns the lock.
+    /// </summary>
+    /// <param name="entity">The entity to unlock.</param>
+    /// <param name="userId">The ID of the user unlocking the entity.</param>
+    /// <returns>True if the entity was unlocked or doesn't support locking; false if the user doesn't own the lock.</returns>
+    /// <remarks>
+    /// If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>, returns true.
+    /// If the user doesn't own the lock, returns false and the lock remains unchanged.
+    /// </remarks>
     public bool UnlockIfSupported(TEntity entity, Guid userId)
     {
         if (entity is not ILockableEntity<TEntity> lockable) 
             return true;
         
-        logger.LogInformation("Unlocking {Entity} with the Id: {EntityId}, from the User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
-        return lockable.Locking.Unlock(userId);
+        logger.LogDebug("Unlocking {Entity} with the Id: {EntityId}, from the User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
+        var result = lockable.Locking.Unlock(userId);
+        if (result)
+        {
+            logger.LogInformation("{Entity} with the Id: {EntityId} successfully unlocked from User with the ID {UserId}", typeof(TEntity).Name, entity.Id, userId);
+        }
+        return result;
     }
     
+    /// <summary>
+    /// Unlocks an entity and its child entities recursively based on <see cref="CascadeLockAttribute"/>.
+    /// </summary>
+    /// <param name="entity">The entity to unlock.</param>
+    /// <param name="userId">The ID of the user unlocking the entity.</param>
+    /// <param name="maxDepth">The maximum depth to traverse when unlocking children (default: 1).</param>
+    /// <returns>True if the entity was unlocked or doesn't support locking; false if the user doesn't own the lock.</returns>
+    /// <remarks>
+    /// This method unlocks the entity first, then recursively unlocks all child entities 
+    /// marked with <see cref="CascadeLockAttribute"/> up to the specified depth.
+    /// </remarks>
     public bool UnlockWithChildrenIfSupported(TEntity entity, Guid userId, int maxDepth = 1)
     {
         var result = UnlockIfSupported(entity, userId);
@@ -49,13 +195,39 @@ public class EntityLockService<TEntity>(
         return result;
     }
 
+    /// <summary>
+    /// Validates that an entity is locked and can be updated by the specified user.
+    /// Throws an exception if the entity is not locked, locked by another user, or the lock has expired.
+    /// </summary>
+    /// <param name="entity">The entity to validate.</param>
+    /// <param name="userId">The ID of the user attempting to update.</param>
+    /// <exception cref="EntityUnlockedException">
+    /// Thrown if the entity is not locked before the update operation.
+    /// </exception>
+    /// <exception cref="EntityLockExpiredException">
+    /// Thrown if the entity's lock has expired.
+    /// </exception>
+    /// <exception cref="EntityLockedException">
+    /// Thrown if the entity is locked by a different user.
+    /// </exception>
+    /// <remarks>
+    /// This method should be called before modifying an entity to ensure proper lock ownership.
+    /// If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>, validation is skipped.
+    /// 
+    /// Validation checks:
+    /// <list type="bullet">
+    /// <item><description>The entity is locked (not null)</description></item>
+    /// <item><description>The lock hasn't expired</description></item>
+    /// <item><description>The lock belongs to the current user</description></item>
+    /// </list>
+    /// </remarks>
     public void ValidateLockForUpdate(TEntity entity, Guid userId)
     {
-        logger.LogInformation("Validating {Entity} with the Id: {EntityId} can be unlocked by User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
+        logger.LogDebug("Validating {Entity} with the Id: {EntityId} can be updated by User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
         
         if (entity is not ILockableEntity<TEntity> lockable)
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
+            logger.LogDebug("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
             return;
         }
         
@@ -63,19 +235,22 @@ public class EntityLockService<TEntity>(
 
         if (lockInfo.LockedByUserId == null)
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} has not been locked prior to update", typeof(TEntity).Name, entity.Id);
+            logger.LogWarning("{Entity} with the Id: {EntityId} has not been locked prior to update", typeof(TEntity).Name, entity.Id);
             throw new EntityUnlockedException(typeof(TEntity).Name, entity.Id);
         }
         
         if (lockInfo.IsExpired())
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} has an expired lock, forcing unlock", typeof(TEntity).Name, entity.Id);
+            var expiredAt = lockInfo.LockedAtUtc!.Value.AddMinutes(lockInfo.LockTimeoutMinutes);
+            logger.LogWarning(
+                "{Entity} with the Id: {EntityId} has an expired lock. Locked by User {LockedByUserId} at {LockedAtUtc:yyyy-MM-dd HH:mm:ss} UTC, expired at {ExpiredAtUtc:yyyy-MM-dd HH:mm:ss} UTC after {TimeoutMinutes} minutes. Attempted access by User {CurrentUserId}",
+                typeof(TEntity).Name, entity.Id, lockInfo.LockedByUserId.Value, lockInfo.LockedAtUtc.Value, expiredAt, lockInfo.LockTimeoutMinutes, userId);
             
             throw new EntityLockExpiredException(
                 typeof(TEntity).Name,
                 entity.Id,
                 lockInfo.LockedByUserId.Value,
-                lockInfo.LockedAtUtc!.Value,
+                lockInfo.LockedAtUtc.Value,
                 lockInfo.LockTimeoutMinutes);
         }
 
@@ -85,66 +260,143 @@ public class EntityLockService<TEntity>(
             return;
         }
 
-        logger.LogInformation("{Entity} with the Id: {EntityId} has cannot be unlocked for the User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
+        logger.LogWarning(
+            "{Entity} with the Id: {EntityId} is locked by User {LockedByUserId} (locked at {LockedAtUtc:yyyy-MM-dd HH:mm:ss} UTC) and cannot be updated by User {CurrentUserId}",
+            typeof(TEntity).Name, entity.Id, lockInfo.LockedByUserId.Value, lockInfo.LockedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown", userId);
         throw new EntityLockedException(
             typeof(TEntity).Name,
             lockInfo.LockedByUserId.Value,
             lockInfo.LockedAtUtc);
     }
     
+    /// <summary>
+    /// Validates that an entity and its child entities are locked and can be updated by the specified user.
+    /// Recursively validates locks on child entities marked with <see cref="CascadeLockAttribute"/>.
+    /// </summary>
+    /// <param name="entity">The entity to validate.</param>
+    /// <param name="userId">The ID of the user attempting to update.</param>
+    /// <param name="maxDepth">The maximum depth to traverse when validating children (default: 1).</param>
+    /// <exception cref="EntityUnlockedException">
+    /// Thrown if the entity or any child entity is not locked before the update operation.
+    /// </exception>
+    /// <exception cref="EntityLockExpiredException">
+    /// Thrown if the entity's or any child entity's lock has expired.
+    /// </exception>
+    /// <exception cref="EntityLockedException">
+    /// Thrown if the entity or any child entity is locked by a different user.
+    /// </exception>
+    /// <remarks>
+    /// This method is typically called before updating an entity with related child entities
+    /// to ensure all entities in the hierarchy are properly locked by the current user.
+    /// </remarks>
     public void ValidateLockForUpdateWithChildren(TEntity entity, Guid userId, int maxDepth = 1)
     {
         ValidateLockForUpdate(entity, userId);
         ValidateChildrenLocksRecursive(entity, userId, currentDepth: 0, maxDepth);
     }
 
+    /// <summary>
+    /// Refreshes the lock expiration time for an entity if the user owns the lock.
+    /// </summary>
+    /// <param name="entity">The entity whose lock should be refreshed.</param>
+    /// <param name="userId">The ID of the user owning the lock.</param>
+    /// <remarks>
+    /// This method extends the lock expiration time to prevent the lock from expiring
+    /// during long-running operations. If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>
+    /// or the user doesn't own the lock, this method does nothing.
+    /// </remarks>
     public void RefreshLockIfOwned(TEntity entity, Guid userId)
     {
         if (entity is not ILockableEntity<TEntity> lockable) 
             return;
         
-        logger.LogInformation("Refreshing lock for {Entity} with the Id: {EntityId} to User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
+        logger.LogDebug("Refreshing lock for {Entity} with the Id: {EntityId} to User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
         lockable.Locking.RefreshLock(userId);
+        logger.LogInformation("{Entity} with the Id: {EntityId} lock successfully refreshed for User with the Id: {UserId}", typeof(TEntity).Name, entity.Id, userId);
     }
     
+    /// <summary>
+    /// Refreshes the lock expiration time for an entity and its child entities recursively.
+    /// </summary>
+    /// <param name="entity">The entity whose lock should be refreshed.</param>
+    /// <param name="userId">The ID of the user owning the lock.</param>
+    /// <param name="maxDepth">The maximum depth to traverse when refreshing children (default: 1).</param>
+    /// <remarks>
+    /// This method extends the lock expiration time for the entity and all child entities
+    /// marked with <see cref="CascadeLockAttribute"/> up to the specified depth.
+    /// </remarks>
     public void RefreshLockWithChildrenIfOwned(TEntity entity, Guid userId, int maxDepth = 1)
     {
         RefreshLockIfOwned(entity, userId);
         RefreshChildrenLocksRecursive(entity, userId, currentDepth: 0, maxDepth);
     }
 
+    /// <summary>
+    /// Checks if an entity is locked by a user other than the specified user.
+    /// </summary>
+    /// <param name="entity">The entity to check.</param>
+    /// <param name="userId">The ID of the user to check against.</param>
+    /// <returns>
+    /// True if the entity is locked by another user; 
+    /// False if the entity is unlocked, locked by the specified user, or the lock has expired.
+    /// </returns>
+    /// <remarks>
+    /// This method is useful for read-only operations to determine if modifications might be blocked.
+    /// If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>, returns false.
+    /// </remarks>
     public bool IsLockedByAnotherUser(TEntity entity, Guid userId)
     {
         if (entity is not ILockableEntity<TEntity> lockable)
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
+            logger.LogDebug("{Entity} with the Id: {EntityId} is not lockable", typeof(TEntity).Name, entity.Id);
             return false;
         }
         
         var lockInfo = lockable.Locking.LockInfo;
         if (lockInfo.LockedByUserId == null || lockInfo.IsExpired())
         {
-            logger.LogInformation("{Entity} with the Id: {EntityId} is currently unlocked or the lock is expired.", typeof(TEntity).Name, entity.Id);
+            logger.LogDebug("{Entity} with the Id: {EntityId} is currently unlocked or the lock is expired.", typeof(TEntity).Name, entity.Id);
             return false;
         }
 
         var isNotLockedByUserId = !lockInfo.IsLockedBy(userId);
-        var logMessage = isNotLockedByUserId
-            ? "{Entity} with the Id: {EntityId} is not locked to the User with the Id: {UserId}"
-            : "{Entity} with the Id: {EntityId} is locked to the User with the Id: {UserId}";
-        logger.LogInformation(logMessage, typeof(TEntity).Name, entity.Id, lockInfo.LockedByUserId);
+        if (isNotLockedByUserId)
+        {
+            logger.LogDebug("{Entity} with the Id: {EntityId} is locked by User {LockedByUserId}, not by User {CurrentUserId}", typeof(TEntity).Name, entity.Id, lockInfo.LockedByUserId, userId);
+        }
         return isNotLockedByUserId;
     }
     
+    /// <summary>
+    /// Forcefully unlocks an entity regardless of lock ownership.
+    /// This is an administrative operation that should be used with caution.
+    /// </summary>
+    /// <param name="entity">The entity to force unlock.</param>
+    /// <remarks>
+    /// This method bypasses normal lock ownership checks and immediately unlocks the entity.
+    /// It's typically used for administrative purposes, such as clearing stale locks.
+    /// If the entity doesn't implement <see cref="ILockableEntity{TEntity}"/>, this method does nothing.
+    /// </remarks>
     public void ForceUnlockIfSupported(TEntity entity)
     {
         if (entity is not ILockableEntity<TEntity> lockable) 
             return;
         
-        logger.LogInformation("{Entity} with the Id: {EntityId} will be forcefully unlocked", typeof(TEntity).Name, entity.Id);
+        logger.LogWarning("{Entity} with the Id: {EntityId} will be forcefully unlocked", typeof(TEntity).Name, entity.Id);
         lockable.Locking.ForceUnlock();
+        logger.LogInformation("{Entity} with the Id: {EntityId} successfully forcefully unlocked", typeof(TEntity).Name, entity.Id);
     }
 
+    /// <summary>
+    /// Forcefully unlocks an entity and its child entities recursively regardless of lock ownership.
+    /// This is an administrative operation that should be used with caution.
+    /// </summary>
+    /// <param name="entity">The entity to force unlock.</param>
+    /// <param name="maxDepth">The maximum depth to traverse when unlocking children (default: 1).</param>
+    /// <remarks>
+    /// This method bypasses normal lock ownership checks and immediately unlocks the entity
+    /// and all child entities marked with <see cref="CascadeLockAttribute"/> up to the specified depth.
+    /// </remarks>
     public void ForceUnlockWithChildrenIfSupported(TEntity entity, int maxDepth = 1)
     {
         ForceUnlockIfSupported(entity);
@@ -183,32 +435,23 @@ public class EntityLockService<TEntity>(
 
     private void LockChild(object child, Guid userId, int currentDepth, int maxDepth)
     {
-        if (child is not ILockableEntity<TEntity>) 
+        if (!IsLockableEntity(child))
             return;
 
         var childEntityType = child.GetType();
-        var entityInterface = childEntityType.GetInterfaces()
-            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ILockableEntity<>));
+        var reflectionInfo = GetReflectionInfo(childEntityType);
 
-        if (entityInterface == null) 
+        if (reflectionInfo.LockingProperty == null || reflectionInfo.LockMethod == null)
             return;
 
-        var lockingProperty = childEntityType.GetProperty("Locking");
-        if (lockingProperty == null) 
-            return;
-
-        var locking = lockingProperty.GetValue(child);
+        var locking = reflectionInfo.LockingProperty.GetValue(child);
         if (locking == null) 
-            return;
-
-        var lockMethod = locking.GetType().GetMethod("Lock");
-        if (lockMethod == null) 
             return;
 
         try
         {
-            logger.LogInformation("Locking child {Entity} to User with the ID {UserId}", childEntityType.Name, userId);
-            lockMethod.Invoke(locking, [userId]);
+            logger.LogDebug("Locking child {Entity} to User with the ID {UserId}", childEntityType.Name, userId);
+            reflectionInfo.LockMethod.Invoke(locking, [userId]);
             LockChildrenRecursive(child, userId, currentDepth + 1, maxDepth);
         }
         catch (TargetInvocationException ex)
@@ -251,24 +494,21 @@ public class EntityLockService<TEntity>(
 
     private void UnlockChild(object child, Guid userId, int currentDepth, int maxDepth)
     {
-        if (child is not ILockableEntity<TEntity>) 
+        if (!IsLockableEntity(child))
             return;
 
         var childEntityType = child.GetType();
-        var lockingProperty = childEntityType.GetProperty("Locking");
-        if (lockingProperty == null) 
+        var reflectionInfo = GetReflectionInfo(childEntityType);
+
+        if (reflectionInfo.LockingProperty == null || reflectionInfo.UnlockMethod == null)
             return;
 
-        var locking = lockingProperty.GetValue(child);
+        var locking = reflectionInfo.LockingProperty.GetValue(child);
         if (locking == null) 
             return;
 
-        var unlockMethod = locking.GetType().GetMethod("Unlock");
-        if (unlockMethod == null) 
-            return;
-
-        logger.LogInformation("Unlocking child {Entity} from User with the ID {UserId}", childEntityType.Name, userId);
-        unlockMethod.Invoke(locking, [userId]);
+        logger.LogDebug("Unlocking child {Entity} from User with the ID {UserId}", childEntityType.Name, userId);
+        reflectionInfo.UnlockMethod.Invoke(locking, [userId]);
         UnlockChildrenRecursive(child, userId, currentDepth + 1, maxDepth);
     }
 
@@ -304,58 +544,61 @@ public class EntityLockService<TEntity>(
 
     private void ValidateChildLock(object child, Guid userId, int currentDepth, int maxDepth)
     {
-        if (child is not ILockableEntity<TEntity>) 
+        if (!IsLockableEntity(child))
             return;
 
         var childEntityType = child.GetType();
-        var lockingProperty = childEntityType.GetProperty("Locking");
-        if (lockingProperty == null) 
+        var reflectionInfo = GetReflectionInfo(childEntityType);
+
+        if (reflectionInfo.LockingProperty == null || reflectionInfo.LockInfoProperty == null || reflectionInfo.IdProperty == null)
             return;
 
-        var locking = lockingProperty.GetValue(child);
+        var locking = reflectionInfo.LockingProperty.GetValue(child);
         if (locking == null) 
             return;
 
-        var lockInfoProperty = locking.GetType().GetProperty("LockInfo");
-        if (lockInfoProperty == null) 
-            return;
-
-        var lockInfo = lockInfoProperty.GetValue(locking) as LockInfo;
+        var lockInfo = reflectionInfo.LockInfoProperty.GetValue(locking) as LockInfo;
         if (lockInfo == null) 
             return;
 
-        var entityIdProperty = childEntityType.GetProperty("Id");
-        var entityId = entityIdProperty?.GetValue(child) as Guid? ?? Guid.Empty;
+        var entityId = reflectionInfo.IdProperty.GetValue(child) as Guid? ?? Guid.Empty;
 
-        logger.LogInformation("Validating child {Entity} with the Id: {EntityId} can be unlocked by User with the Id: {UserId}", 
+        logger.LogDebug("Validating child {Entity} with the Id: {EntityId} can be updated by User with the Id: {UserId}", 
             childEntityType.Name, entityId, userId);
 
         if (lockInfo.LockedByUserId == null)
         {
-            logger.LogInformation("Child {Entity} with the Id: {EntityId} has not been locked prior to update", 
+            logger.LogWarning("Child {Entity} with the Id: {EntityId} has not been locked prior to update", 
                 childEntityType.Name, entityId);
             throw new EntityUnlockedException(childEntityType.Name, entityId);
         }
 
         if (lockInfo.IsExpired())
         {
-            logger.LogInformation("Child {Entity} with the Id: {EntityId} has an expired lock, forcing unlock", 
-                childEntityType.Name, entityId);
-            var forceUnlockMethod = locking.GetType().GetMethod("ForceUnlock");
-            forceUnlockMethod?.Invoke(locking, null);
-            return;
+            var expiredAt = lockInfo.LockedAtUtc!.Value.AddMinutes(lockInfo.LockTimeoutMinutes);
+            logger.LogWarning(
+                "Child {Entity} with the Id: {EntityId} has an expired lock. Locked by User {LockedByUserId} at {LockedAtUtc:yyyy-MM-dd HH:mm:ss} UTC, expired at {ExpiredAtUtc:yyyy-MM-dd HH:mm:ss} UTC after {TimeoutMinutes} minutes. Attempted access by User {CurrentUserId}",
+                childEntityType.Name, entityId, lockInfo.LockedByUserId.Value, lockInfo.LockedAtUtc.Value, expiredAt, lockInfo.LockTimeoutMinutes, userId);
+            
+            throw new EntityLockExpiredException(
+                childEntityType.Name,
+                entityId,
+                lockInfo.LockedByUserId.Value,
+                lockInfo.LockedAtUtc.Value,
+                lockInfo.LockTimeoutMinutes);
         }
 
         if (lockInfo.IsLockedBy(userId))
         {
-            logger.LogInformation("Child {Entity} with the Id: {EntityId} is locked to the User with the Id: {UserId}. Update can proceed", 
+            logger.LogDebug("Child {Entity} with the Id: {EntityId} is locked to the User with the Id: {UserId}. Update can proceed", 
                 childEntityType.Name, entityId, userId);
             ValidateChildrenLocksRecursive(child, userId, currentDepth + 1, maxDepth);
             return;
         }
 
-        logger.LogInformation("Child {Entity} with the Id: {EntityId} cannot be unlocked for the User with the Id: {UserId}", 
-            childEntityType.Name, entityId, userId);
+        logger.LogWarning(
+            "Child {Entity} with the Id: {EntityId} is locked by User {LockedByUserId} (locked at {LockedAtUtc:yyyy-MM-dd HH:mm:ss} UTC) and cannot be unlocked by User {CurrentUserId}",
+            childEntityType.Name, entityId, lockInfo.LockedByUserId.Value, lockInfo.LockedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown", userId);
         throw new EntityLockedException(
             childEntityType.Name,
             lockInfo.LockedByUserId.Value,
@@ -394,28 +637,24 @@ public class EntityLockService<TEntity>(
 
     private void RefreshChildLock(object child, Guid userId, int currentDepth, int maxDepth)
     {
-        if (child is not ILockableEntity<TEntity>) 
+        if (!IsLockableEntity(child))
             return;
 
         var childEntityType = child.GetType();
-        var lockingProperty = childEntityType.GetProperty("Locking");
-        if (lockingProperty == null) 
+        var reflectionInfo = GetReflectionInfo(childEntityType);
+
+        if (reflectionInfo.LockingProperty == null || reflectionInfo.RefreshLockMethod == null || reflectionInfo.IdProperty == null)
             return;
 
-        var locking = lockingProperty.GetValue(child);
+        var locking = reflectionInfo.LockingProperty.GetValue(child);
         if (locking == null) 
             return;
 
-        var refreshLockMethod = locking.GetType().GetMethod("RefreshLock");
-        if (refreshLockMethod == null) 
-            return;
+        var entityId = reflectionInfo.IdProperty.GetValue(child) as Guid? ?? Guid.Empty;
 
-        var entityIdProperty = childEntityType.GetProperty("Id");
-        var entityId = entityIdProperty?.GetValue(child) as Guid? ?? Guid.Empty;
-
-        logger.LogInformation("Refreshing lock for child {Entity} with the Id: {EntityId} to User with the Id: {UserId}", 
+        logger.LogDebug("Refreshing lock for child {Entity} with the Id: {EntityId} to User with the Id: {UserId}", 
             childEntityType.Name, entityId, userId);
-        refreshLockMethod.Invoke(locking, [userId]);
+        reflectionInfo.RefreshLockMethod.Invoke(locking, [userId]);
         RefreshChildrenLocksRecursive(child, userId, currentDepth + 1, maxDepth);
     }
 
@@ -451,27 +690,23 @@ public class EntityLockService<TEntity>(
 
     private void ForceUnlockChild(object child, int currentDepth, int maxDepth)
     {
-        if (child is not ILockableEntity<TEntity>) 
+        if (!IsLockableEntity(child))
             return;
 
         var childEntityType = child.GetType();
-        var lockingProperty = childEntityType.GetProperty("Locking");
-        if (lockingProperty == null) 
+        var reflectionInfo = GetReflectionInfo(childEntityType);
+
+        if (reflectionInfo.LockingProperty == null || reflectionInfo.ForceUnlockMethod == null || reflectionInfo.IdProperty == null)
             return;
 
-        var locking = lockingProperty.GetValue(child);
+        var locking = reflectionInfo.LockingProperty.GetValue(child);
         if (locking == null) 
             return;
 
-        var forceUnlockMethod = locking.GetType().GetMethod("ForceUnlock");
-        if (forceUnlockMethod == null) 
-            return;
+        var entityId = reflectionInfo.IdProperty.GetValue(child) as Guid? ?? Guid.Empty;
 
-        var entityIdProperty = childEntityType.GetProperty("Id");
-        var entityId = entityIdProperty?.GetValue(child) as Guid? ?? Guid.Empty;
-
-        logger.LogInformation("Forcefully unlocking child {Entity} with the Id: {EntityId}", childEntityType.Name, entityId);
-        forceUnlockMethod.Invoke(locking, null);
+        logger.LogWarning("Forcefully unlocking child {Entity} with the Id: {EntityId}", childEntityType.Name, entityId);
+        reflectionInfo.ForceUnlockMethod.Invoke(locking, null);
         ForceUnlockChildrenRecursive(child, currentDepth + 1, maxDepth);
     }
 }

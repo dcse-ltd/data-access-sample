@@ -11,21 +11,21 @@ public static class AuditingConfiguration
     {
         builder.OwnsOne(e => e.Auditing, auditing =>
         {
-            auditing.Property(a => a.AuditInfo.CreatedByUserId)
-                .IsRequired();
-            
-            auditing.Property(a => a.AuditInfo.CreatedAtUtc)
-                .IsRequired();
-            
-            auditing.Property(a => a.AuditInfo.ModifiedByUserId)
-                .IsRequired(false);
-            
-            auditing.Property(a => a.AuditInfo.ModifiedAtUtc)
-                .IsRequired(false);
-            
-            auditing.HasIndex(a => a.AuditInfo.CreatedAtUtc);
-            
-            auditing.HasIndex(a => new { a.AuditInfo.ModifiedAtUtc, a.AuditInfo.ModifiedByUserId });
+            auditing.OwnsOne(a => a.AuditInfo, auditInfo =>
+            {
+                auditInfo.Property(ai => ai.CreatedByUserId)
+                    .IsRequired();
+                
+                auditInfo.Property(ai => ai.CreatedAtUtc)
+                    .IsRequired();
+                
+                // ModifiedByUserId and ModifiedAtUtc are non-nullable types, so they are required by default
+                // They will be set when the entity is modified
+                
+                auditInfo.HasIndex(ai => ai.CreatedAtUtc);
+                
+                auditInfo.HasIndex(ai => new { ai.ModifiedAtUtc, ai.ModifiedByUserId });
+            });
         });
     }
 }

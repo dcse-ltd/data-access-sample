@@ -21,7 +21,10 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasForeignKey(op => op.OrderId)
             .OnDelete(DeleteBehavior.Cascade);
         
-        builder.HasIndex(o => o.CustomerId);
-        builder.HasIndex(o => o.Date); 
+        builder
+            .HasIndex(o => o.CustomerId);
+        
+        builder
+            .HasIndex(o => o.Date); 
     }
 }

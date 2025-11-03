@@ -20,5 +20,6 @@ public static class ServiceComposition
         services.AddScoped(typeof(IEntityLockService<>), typeof(EntityLockService<>));
         services.AddScoped(typeof(IEntitySoftDeleteService<>), typeof(EntitySoftDeleteService<>));
         services.AddScoped(typeof(ICoreEntityService<>), typeof(CoreEntityService<>));
+        services.AddScoped<ICollectionSyncService, CollectionSyncService>();
     }
 }

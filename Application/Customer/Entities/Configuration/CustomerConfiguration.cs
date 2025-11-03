@@ -7,28 +7,37 @@ public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
 {
     public void Configure(EntityTypeBuilder<Customer> builder)
     {
-        _ = builder
+        builder
             .Property(x => x.FirstName)
             .IsRequired()
             .HasMaxLength(64);
         
-        _ = builder
+        builder
             .Property(x => x.LastName)
             .IsRequired()
             .HasMaxLength(64);
 
-        _ = builder
+        builder
             .Property(x => x.Email)
             .IsRequired()
             .HasMaxLength(128);
         
-        _ = builder
+        builder
             .Property(x => x.Phone)
             .IsRequired()
             .HasMaxLength(16);
 
-        _ = builder
+        builder
             .HasIndex(x => x.Email)
             .IsUnique();
+
+        builder
+            .HasIndex(x => x.Email);
+
+        builder
+            .HasIndex(x => x.LastName);
+
+        builder
+            .HasIndex(x => x.Phone);
     }
 }
